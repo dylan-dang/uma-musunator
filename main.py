@@ -427,7 +427,7 @@ class RerollAgent(Agent):
 
     def skip_news(self):
         # wait for notification
-        self.wait_for_color(788, 38, (255, 51, 118), click=(896, 987), timeout=20) # click skip in the meantime
+        self.wait_for_color(788, 38, (255, 51, 118), click=(896, 987), timeout=40) # click skip in the meantime
 
     def claim_present(self):
         self.click(792, 741) # click present
