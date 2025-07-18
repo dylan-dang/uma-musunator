@@ -220,6 +220,9 @@ class Agent:
 
     def click(self, x_offset: int, y_offset: int):
         x, y = self.client_to_screen(x_offset, y_offset)
+        screen_width, screen_height = pyautogui.size()
+        if not (0 <= x < screen_width and 0 <= y < screen_height):
+            return
         pyautogui.click(x, y)
         time.sleep(0.1)
 
@@ -262,6 +265,7 @@ class Agent:
     
     def ensure_window_size(self):
         while self.window.size != Agent.WINDOW_SIZE:
+            self.window.moveTo(0, 0)
             self.window.size = Agent.WINDOW_SIZE
 
     def get_pixel(self, x_offset: int, y_offset: int):
@@ -351,9 +355,17 @@ class RerollAgent(Agent):
         self.target = Counter(config['target'])
         self.rolls = Counter()
     
-    def click_until_criware(self):
-        self.wait_for_color(89, 958, (0, 92, 173), click=(954, 677)) # click center right buttons in the meantime
-        self.ensure_window_size()
+    def wait_for_white_screen(self, timeout = 20, click: tuple[int, int] | None = None):
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            screenshot = self.capture()
+            sum = np.sum(screenshot > 250)
+            ratio = sum / screenshot.size
+            if ratio > 0.8:
+                return
+            if click:
+                self.click(*click)
+        raise TimeoutError("White screen not found")
 
     def delete_account(self):
         self.rolls.clear()
@@ -362,8 +374,9 @@ class RerollAgent(Agent):
         time.sleep(0.6) 
         self.click(953, 730) # click delete account
         time.sleep(0.6)
-        # done in default resolution, wait for criware logo
-        self.click_until_criware()
+        # wait for white screen by checking screenshot
+        self.wait_for_white_screen(click=(954, 677))
+        self.ensure_window_size()
         
     def accept_terms(self):
         self.click(1155, 455) # view terms
@@ -409,7 +422,7 @@ class RerollAgent(Agent):
 
         self.trainer_info()
         self.wait_for_color(901, 512, (236, 231, 228)) # gray label
-        time.sleep(0.6) # wait for animation
+        time.sleep(0.4) # wait for animation
         self.standard_ok() # confirm info
 
     def skip_news(self):
@@ -522,6 +535,7 @@ def restart_game(config: dict, timeout = 10):
         wait_for_window(WINDOW_TITLE, visible=False)
 
     path = config.get('path', default_path)
+    log(f'Starting game...')
     os.startfile(path)
 
     start_time = time.time()
@@ -534,8 +548,7 @@ def restart_game(config: dict, timeout = 10):
     log(f'Elapsed time to start game: {time.time() - start_time:.2f}s')
 
     agent = RerollAgent(WINDOW_TITLE, config)
-    log(f'clicking until criware...')
-    agent.click_until_criware()
+    agent.wait_for_color(89, 958, (0, 92, 173), click=(1920 // 2, 1080 // 2)) # click until criware
     if agent.has_trainer_id():
         agent.delete_account()
     return agent
