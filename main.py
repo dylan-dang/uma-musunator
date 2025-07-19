@@ -403,7 +403,7 @@ class RerollAgent(Agent):
         self.confirm_age()
 
         time.sleep(0.2)
-        self.wait_for_color(1169, 679, (137, 206, 0)) # button green
+        self.wait_for_color(1169, 679, (137, 206, 0)) # button green TODO: replace
         # self.wait_for_color(1169, 679, (131, 200, 0)) # button green
         time.sleep(0.6)
         self.standard_ok()
