@@ -1,10 +1,10 @@
 import json
-import math
 import os
 import pickle
 import time
+import traceback
 from collections import Counter
-from ctypes import windll
+from turtle import window_width
 from typing import Iterable, TypedDict
 
 import cv2
@@ -13,8 +13,8 @@ import pyautogui
 import pygetwindow
 import requests
 import win32gui  # type: ignore
-import win32ui  # type: ignore
 from bs4 import BeautifulSoup
+from pyscreeze import pixel, screenshot
 from tqdm import tqdm
 
 hasher = cv2.img_hash.PHash_create() #type: ignore
@@ -102,19 +102,6 @@ def fetch_gametora_image(path: str):
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"Failed to download image from {path}. Reason: {e}")
 
-def color_similarity(rgb1, rgb2):
-    rgb1 = np.array(rgb1, dtype=np.float32)
-    rgb2 = np.array(rgb2, dtype=np.float32)
-
-    distance = np.linalg.norm(rgb1 - rgb2)
-    max_distance = 255 * np.sqrt(3)
-
-    similarity = 1.0 - (distance / max_distance)
-    return similarity
-
-def is_disimilar(pixel: tuple[int, int, int], color: tuple[int, int, int], similarity: float = 1):
-    return color_similarity(pixel, color) < similarity
-
 def compare_hashes(hash1: str, hash2: str):
     return bin(int(hash1, 16) ^ int(hash2, 16)).count('1')
 
@@ -160,8 +147,8 @@ class Agent:
     WINDOW_SIZE = (1920, 1080)
 
     supports: list[Support]
+    window_ensurance: bool
 
-    
     def __init__(self, window_title: str):
         self.window_title = window_title
         self.hwnd = win32gui.FindWindow(None, window_title)
@@ -169,7 +156,6 @@ class Agent:
             raise RuntimeError(f"Window {window_title} not found")
         
         self.window = pygetwindow.getWindowsWithTitle(window_title)[0]
-        self.ensure_window_size()
         try:
             self.window.activate()
         except pygetwindow.PyGetWindowException as e:
@@ -177,7 +163,8 @@ class Agent:
                 pass
             else:
                 raise e
-
+        self.window_ensurance = True
+        self.ensure_window()
         self.supports = self.load_supports()
 
     def load_supports(self) -> list[Support]:
@@ -219,6 +206,7 @@ class Agent:
         # return self.window.left + x_offset + 8, self.window.top + y_offset + 31
 
     def click(self, x_offset: int, y_offset: int):
+        self.ensure_window()
         x, y = self.client_to_screen(x_offset, y_offset)
         screen_width, screen_height = pyautogui.size()
         if not (0 <= x < screen_width and 0 <= y < screen_height):
@@ -263,68 +251,67 @@ class Agent:
 
                 yield closest_match, closest_match_distance
     
-    def ensure_window_size(self):
-        while self.window.size != Agent.WINDOW_SIZE:
-            self.window.moveTo(0, 0)
-            self.window.size = Agent.WINDOW_SIZE
+    def set_window_ensurance(self, value: bool):
+        self.window_ensurance = value
 
-    def get_pixel(self, x_offset: int, y_offset: int):
-        screenshot = self.capture()
-        bgr = screenshot[y_offset, x_offset]
-        rgb = int(bgr[2]), int(bgr[1]), int(bgr[0])
-        return rgb
-    
-    def wait_for_color(self, x: int, y: int, color: tuple[int, int, int], similarity: float = 0.99, ignore_error: bool = False, timeout = 10, click: tuple[int, int] | None = None, delay: float = 0.01):
-        pixel = self.get_pixel(x, y)
+    def ensure_window(self, timeout = 10, poll_interval = 0.05):
+        if not self.window_ensurance:
+            return
+        width, height = Agent.WINDOW_SIZE
+        left, top = 0, 0
+        win32gui.MoveWindow(self.hwnd, left, top, width, height, True)
+        end_time = time.time() + timeout
+        while time.time() < end_time:
+            rect = win32gui.GetWindowRect(self.hwnd)
+            x, y, w, h = rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]
+            if (x, y) == (left, top) and (w, h) == (width, height):
+                return 
+            time.sleep(poll_interval)
+        raise TimeoutError("Window did not move/resize to the expected position in time.")
+
+    def pixel_matches(self, x: int, y: int, color: tuple[int, int, int], tolerance = 0):
+        pix = pixel(*self.client_to_screen(x, y))
+
+        for i in range(3):  # RGB
+            if abs(pix[i] - color[i]) > tolerance:
+                return False
+        return True
+
+    def wait_for_color(self, x: int, y: int, color: tuple[int, int, int], tolerance = 0, ignore_error: bool = False, timeout = 10, click: tuple[int, int] | None = None, delay: float = 0.01):
+        self.ensure_window()
         start_time = time.time()
-        while is_disimilar(pixel, color, similarity):
+        while not self.pixel_matches(x, y, color, tolerance):
             if click:
                 self.click(*click)
             time.sleep(delay)
-            pixel = self.get_pixel(x, y)
-            if time.time() - start_time > timeout:  # debug after 10 seconds
-                message = f"more than {timeout} seconds waiting for color {color} at ({x}, {y}), found color: {pixel}"
+            if time.time() - start_time > timeout:
+                message = f"more than {timeout} seconds waiting for color {color} at ({x}, {y})"
                 if ignore_error:
                     log(f"WARNING: {message}")
                     return
                 else:
                     raise TimeoutError(message)
         time.sleep(0.05)
-
+    
     def capture(self):
-        self.ensure_window_size()
-         # Adapted from https://stackoverflow.com/questions/19695214/screenshot-of-inactive-window-printwindow-win32gui
-        windll.user32.SetProcessDPIAware()
-
+        self.ensure_window()
         left, top, right, bottom = win32gui.GetClientRect(self.hwnd)
-        w = right - left
-        h = bottom - top
+        width = right - left
+        height = bottom - top
 
-        hwnd_dc = win32gui.GetWindowDC(self.hwnd)
-        mfc_dc = win32ui.CreateDCFromHandle(hwnd_dc)
-        save_dc = mfc_dc.CreateCompatibleDC()
-        bitmap = win32ui.CreateBitmap()
-        bitmap.CreateCompatibleBitmap(mfc_dc, w, h)
-        save_dc.SelectObject(bitmap)
-
-        # If Special K is running, this number is 3. If not, 1
-        result = windll.user32.PrintWindow(self.hwnd, save_dc.GetSafeHdc(), 3)
-
-        bmpinfo = bitmap.GetInfo()
-        bmpstr = bitmap.GetBitmapBits(True)
-
-        img = np.frombuffer(bmpstr, dtype=np.uint8).reshape(
-            (bmpinfo["bmHeight"], bmpinfo["bmWidth"], 4))
-        # make image C_CONTIGUOUS and drop alpha channel
-        img = np.ascontiguousarray(img)[..., :-1]
-
-        if not result:  # result should be 1
-            win32gui.DeleteObject(bitmap.GetHandle())
-            save_dc.DeleteDC()
-            mfc_dc.DeleteDC()
-            win32gui.ReleaseDC(self.hwnd, hwnd_dc)
-            raise RuntimeError(f"Unable to acquire screenshot! Result: {result}")
-
+        screen_left, screen_top = self.client_to_screen(left, top)
+        region = (screen_left, screen_top, width, height)
+        # Clip region to stay within screen bounds
+        screen_width, screen_height = pyautogui.size()
+        region = (
+            max(0, min(screen_left, screen_width)),
+            max(0, min(screen_top, screen_height)), 
+            min(width, screen_width - max(0, screen_left)),
+            min(height, screen_height - max(0, screen_top))
+        )
+        img = screenshot(region=region)
+        img = np.array(img)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         return img
 
     def extract_first_trainer_id_char(self):
@@ -375,8 +362,10 @@ class RerollAgent(Agent):
         self.click(953, 730) # click delete account
         time.sleep(0.6)
         # wait for white screen by checking screenshot
+        self.set_window_ensurance(False)
         self.wait_for_white_screen(click=(954, 677))
-        self.ensure_window_size()
+        self.set_window_ensurance(True)
+        self.ensure_window()
         
     def accept_terms(self):
         self.click(1155, 455) # view terms
@@ -438,7 +427,7 @@ class RerollAgent(Agent):
     def select_banner(self):
         time.sleep(0.4)
         # wait until 4th green dot is filled
-        self.wait_for_color(548, 716, (156, 223, 24), 0.98, click=(857, 633), delay=0.4) # click right until 4th page
+        self.wait_for_color(548, 716, (156, 223, 24), click=(857, 633), delay=0.4) # click right until 4th page
 
     def go_to_scout(self):
         # click scout until scout title is visible
@@ -497,7 +486,7 @@ class RerollAgent(Agent):
 
         if bulk > 0:
             self.click(420, 977) # 10x scout back button
-            self.wait_for_color(167, 28, (247, 66, 165), 0.98) # scout title
+            self.wait_for_color(167, 28, (247, 66, 165)) # scout title
 
         for i in range(single):
             self.scout_single(i == 0)
@@ -548,7 +537,8 @@ def restart_game(config: dict, timeout = 10):
     log(f'Elapsed time to start game: {time.time() - start_time:.2f}s')
 
     agent = RerollAgent(WINDOW_TITLE, config)
-    agent.wait_for_color(89, 958, (0, 92, 173), click=(1920 // 2, 1080 // 2)) # click until criware
+    # agent.wait_for_color(86, 945, (0, 92, 173), click=(1920 // 2, 1080 // 2)) # click until criware
+    agent.wait_for_white_screen(click=(960, 800))
     if agent.has_trainer_id():
         agent.delete_account()
     return agent
@@ -581,8 +571,9 @@ def main():
                 elapsed = time.time() - start_time
                 avg_time = elapsed / n
                 log(f'Average time per reroll: {avg_time:.2f}s')
-        except TimeoutError as e:
-            log(f'TimeoutError: {e}, restarting...')
+        except Exception as e:
+            traceback.print_exc()
+            log(f'Error: {e}, Restarting...')
             agent = restart_game(config)
         finally:
             n += 1
